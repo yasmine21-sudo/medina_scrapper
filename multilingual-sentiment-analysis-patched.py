@@ -4,6 +4,8 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TensorFlow logging
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TensorFlow warnings
 os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'  # Suppress TensorFlow warnings
 import tensorflow as tf
+import time
+import h5py
 import requests
 from datetime import datetime
 import urllib.parse
@@ -1356,6 +1358,114 @@ def create_pdf_with_design(sections, output_path, logo_path="logo_medina.png"):
     doc.build(story)
     print(f"📑 Rapport stylisé généré : {output_path}")
 
+# -----------------------
+# CONFIG (Option B - key in script)
+# -----------------------
+API_KEY = "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"  
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_MODEL = "meta-llama/llama-3.2-3b-instruct:free" 
+HTTP_REFERER = "http://localhost"
+X_TITLE = "Medina Strategic Report Generator"
+
+# -----------------------
+# Robust OpenRouter request helper
+# -----------------------
+def safe_openrouter_request(api_url, api_key, payload, section_name, output_file,
+                            max_retries=5, timeout=180, backoff_factor=2):
+    """Send a POST to OpenRouter with retries, backoff, validation and file-saving.
+       Returns the extracted assistant content string on success, or None on failure.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": HTTP_REFERER,
+        "X-Title": X_TITLE
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.post(api_url, headers=headers, json=payload, timeout=timeout)
+            # If non-2xx this will raise HTTPError and be handled below
+            resp.raise_for_status()
+            data = resp.json()
+
+            # Robust extraction of text content (supporting different shapes)
+            content = None
+            if isinstance(data, dict):
+                # standard OpenRouter / HF-like chat completion shape
+                choices = data.get("choices")
+                if choices and len(choices) > 0:
+                    # prefer message.content
+                    first = choices[0]
+                    if isinstance(first, dict):
+                        msg = first.get("message") or first.get("delta") or first
+                        if isinstance(msg, dict):
+                            content = msg.get("content") or msg.get("text")
+                        else:
+                            # fallback: convert to string
+                            content = str(msg)
+                # fallback: maybe model returns 'output' or text in top-level
+                if content is None:
+                    content = data.get("output") or data.get("text") or json.dumps(data, ensure_ascii=False, indent=2)
+            else:
+                content = str(data)
+
+            # Save to file
+            with open(output_file, "w", encoding="utf-8") as f:
+                f.write(f"===== {section_name.upper()} =====\n\n")
+                f.write(content)
+                f.write("\n\n✅ Section générée avec succès.\n")
+
+            print(f"✅ Section '{section_name}' enregistrée dans {output_file}")
+            return content
+
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            text = e.response.text if e.response is not None else str(e)
+            # Rate limit -> backoff and retry
+            if status == 429:
+                wait = backoff_factor ** attempt
+                print(f"⚠️ 429 Too Many Requests. Retry {attempt}/{max_retries} in {wait}s...")
+                time.sleep(wait)
+                continue
+            # Unauthorized / invalid key -> immediate stop
+            if status in (401, 403):
+                print(f"❌ Authorization error ({status}): {text}")
+                break
+            # Not found -> likely model or endpoint -> stop
+            if status == 404:
+                print(f"❌ 404 Not Found ({section_name}): {text}")
+                break
+            print(f"❌ HTTP Error ({status}): {text}")
+            break
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            wait = backoff_factor ** attempt
+            print(f"⚠️ Network error ({type(e).__name__}): {e}. Retry {attempt}/{max_retries} in {wait}s...")
+            time.sleep(wait)
+            continue
+
+        except Exception as e:
+            print(f"❌ Erreur inattendue lors de la requête OpenRouter: {e}")
+            break
+
+    print(f"🚨 Impossible de générer la section '{section_name}' après {max_retries} essais.")
+    return None
+
+# -----------------------
+# Quick connectivity tester
+# -----------------------
+def test_openrouter_connection():
+    if API_KEY.startswith("REPLACE_"):
+        print("⚠️ API_KEY placeholder found. Replace with your new OpenRouter key before testing.")
+        return False
+    payload = {
+        "model": DEFAULT_MODEL,
+        "messages": [{"role": "user", "content": "Bonjour — teste la connexion. Réponds par OK."}]
+    }
+    res = safe_openrouter_request(OPENROUTER_URL, API_KEY, payload, "Connection test", "test_openrouter.txt", max_retries=2)
+    return res is not None    
+
 def clean_report_text(text: str) -> str:
     """
     Nettoie le texte généré (Markdown) pour une mise en page PDF propre.
@@ -1367,6 +1477,7 @@ def clean_report_text(text: str) -> str:
     text = re.sub(r'\n{2,}', '\n', text)         # limite les doubles retours ligne
     text = text.strip()
     return text
+
 
 def generate_strategic_report_from_posts(df):
     print("\n📊 Generating post-based strategic improvement report...")
@@ -1384,6 +1495,7 @@ def generate_strategic_report_from_posts(df):
 
     conn = get_pg_connection()
     if conn is None:
+        print("❌ DB connection unavailable.")
         return
 
     def get_post_message(post_id):
@@ -1413,124 +1525,85 @@ def generate_strategic_report_from_posts(df):
     if not posts_and_comments:
         print("❌ No valid comments to generate report.")
         return
+    # Shared base prompt parts
+    date_str = datetime.now().strftime('%d/%m/%Y')
+    system_prompt_analysis = "Tu es un consultant en marketing digital et analyse de données sociales."
+    # Use single model variable so it's easy to change
+    model_to_use = DEFAULT_MODEL
 
-    prompt = f"""
-Vous êtes consultant en marketing digital et stratégie de communication spécialisé dans l’analyse des retours clients sur les réseaux sociaux pour les centres commerciaux et espaces de loisirs.
-Vous analysez ici des publications Facebook réelles du El Medina Center (commerce & divertissement, Sidi Bel Abbès, Algérie), ainsi que les commentaires laissés par les visiteurs et clients (avis, questions, plaintes, suggestions, réactions émotionnelles…).
-Chaque élément contient :
- Nos posts Facebook, Les commentaires associés
-Vos missions :
-    Analyse du contenu publié
-Évaluer le ton, la clarté du message, et l’impact émotionnel de chaque publication (attractivité, cohérence avec la marque, capacité à susciter l’engagement).
-Identifier les éléments de communication qui fonctionnent bien et ceux qui pourraient être améliorés.
-    Analyse des retours clients (commentaires)
-Repérer les thèmes récurrents : satisfaction, réclamations, questions fréquentes, besoins non adressés.
-Identifier les opportunités d’engagement manquées (absence de réponse, ton inadapté, manque d’informations).
-Dégager les attentes implicites du public (prix, événements, confort, nouveautés, horaires, offres spéciales, accessibilité…).
-    Amélioration de la stratégie de contenu
-Proposer des axes d’amélioration pour la stratégie de communication du El Medina Center sur Facebook (ton, visuels, rythme de publication, storytelling, formats vidéo, hashtags…).
-Formuler des réponses types et entrées FAQ pour répondre efficacement aux questions fréquentes (horaires, stationnement, activités, événements, restaurants, etc.).
-Recommander des nouveaux sujets de publications ou campagnes thématiques (événements familiaux, offres saisonnières, coulisses du centre, promotions locales…).
-    Benchmark et positionnement concurrentiel (optionnel)
-S’inspirer des meilleures pratiques observées dans d’autres centres commerciaux privés algériens (ex : Garden City Oran, Bab Ezzouar, Park Mall Sétif).
-Proposer des idées différenciantes pour renforcer la notoriété et l’engagement d’El Medina Center.
-Format : Rapport professionnel en PDF en français comprenant :
-Synthèse stratégique
-Analyse détaillée par publication
-Graphiques ou tableaux de synthèse si nécessaire
-Recommandations opérationnelles (contenu, community management, engagement client, campagnes publicitaires)
-
-Préparé par : Équipe IA
-Date : {datetime.now().strftime('%d/%m/%Y')}
-
-Dataset:
-{json.dumps(posts_and_comments, indent=2, ensure_ascii=False)}
-"""
-
-    API_URL = "https://openrouter.ai/api/v1/chat/completions"
-    api_key = "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" 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
-    
     # ==============================
     # 1. Analyse des commentaires
     # ==============================
     payload_analyse = {
-        "model": "meta-llama/llama-4-maverick:free",
+        "model": model_to_use,
         "messages": [
-            {"role": "system", "content": "Tu es un consultant en marketing digital et analyse de données sociales."},
-            {"role": "user", "content": f"""
-    Analyse les publications et commentaires suivants du centre commercial El Medina Center. 
-    Fournis une analyse détaillée des émotions, de la tonalité, et des thématiques émergentes. 
-    Décris aussi les points forts et faibles de la communication. 
-    Dataset:
-    {json.dumps(posts_and_comments[:10], indent=2, ensure_ascii=False)}
-    """}
+            {"role": "system", "content": system_prompt_analysis},
+            {"role": "user", "content": (
+                "Analyse les publications et commentaires suivants du centre commercial El Medina Center. "
+                "Fournis une analyse détaillée des émotions, de la tonalité, et des thématiques émergentes. "
+                "Décris aussi les points forts et faibles de la communication.\n\n"
+                f"Dataset (sample, {len(df)} posts):\n{json.dumps(df, indent=2, ensure_ascii=False)}\n\n"
+                "Format de sortie souhaité (FR):\n"
+                "1) Synthèse stratégique courte (4-6 lignes)\n"
+                "2) Analyse par publication (titre: post_id, observations, ton, suggestions)\n"
+                "3) Liste des thèmes récurrents\n"
+                "4) Priorités opérationnelles (court terme / moyen terme)\n"
+            )}
         ]
     }
-
-    safe_openrouter_request(API_URL, headers, payload_analyse, "Analyse des commentaires", "rapport_analyse.txt")
+    safe_openrouter_request(OPENROUTER_URL, API_KEY, payload_analyse, "Analyse des commentaires", "rapport_analyse.txt")
 
     # ========================================
     #  2. Recommandations stratégiques
     # ========================================
     payload_reco = {
-        "model": "meta-llama/llama-4-maverick:free",
+        "model": model_to_use,
         "messages": [
             {"role": "system", "content": "Tu es un expert en stratégie digitale et réseaux sociaux."},
-            {"role": "user", "content": f"""
-    Voici des publications Facebook et leurs commentaires.
-    Propose des recommandations concrètes pour améliorer la stratégie de contenu, le ton, et les formats.
-    Dataset:
-    {json.dumps(posts_and_comments[:10], indent=2, ensure_ascii=False)}
-    """}
+            {"role": "user", "content": (
+                "À partir des posts et commentaires fournis, propose des recommandations concrètes "
+                "pour améliorer la stratégie de contenu (formats, ton, cadence), community management, "
+                "et KPI à suivre. Inclue exemples de posts (3 exemples) et templates de réponse (5 modèles).\n\n"
+                f"Dataset (sample):\n{json.dumps(df, indent=2, ensure_ascii=False)}"
+            )}
         ]
     }
-
-    safe_openrouter_request(API_URL, headers, payload_reco, "Recommandations stratégiques", "rapport_recommandations.txt")
+    safe_openrouter_request(OPENROUTER_URL, API_KEY, payload_reco, "Recommandations stratégiques", "rapport_recommandations.txt")
 
     # ========================================
     #  3. FAQ et gestion des interactions
     # ========================================
     payload_faq = {
-        "model": "meta-llama/llama-4-maverick:free",
+        "model": model_to_use,
         "messages": [
-            {"role": "system", "content": "Tu es un community manager spécialisé en gestion de centres commerciaux."},
-            {"role": "user", "content": f"""
-    À partir des commentaires suivants, identifie les questions fréquentes (horaires, parkings, offres, événements).
-    Propose des réponses automatiques et prêtes à publier.
-    Dataset:
-    {json.dumps(posts_and_comments[:10], indent=2, ensure_ascii=False)}
-    """}
+            {"role": "system", "content": "Tu es un community manager expérimenté pour centres commerciaux."},
+            {"role": "user", "content": (
+                "Identifie les questions fréquentes et génère des réponses types prêtes à poster. "
+                "Crée une petite FAQ (questions / réponses) et 10 messages courts pour les réponses rapides.\n\n"
+                f"Dataset (sample):\n{json.dumps(df, indent=2, ensure_ascii=False)}"
+            )}
         ]
     }
-
-    safe_openrouter_request(API_URL, headers, payload_faq, "FAQ et réponses types", "rapport_faq.txt")
+    safe_openrouter_request(OPENROUTER_URL, API_KEY, payload_faq, "FAQ et réponses types", "rapport_faq.txt")
 
     # ========================================
     #  4. Idées de publications & benchmarking
     # ========================================
     payload_idees = {
-        "model": "meta-llama/llama-4-maverick:free",
+        "model": model_to_use,
         "messages": [
-            {"role": "system", "content": "Tu es un expert en communication créative pour les centres commerciaux algériens."},
-            {"role": "user", "content": f"""
-    Analyse les posts et commentaires suivants d’El Medina Center.
-    Propose des idées de contenus futurs alignés sur les réactions et attentes du public.
-    Dataset:
-    {json.dumps(posts_and_comments[:10], indent=2, ensure_ascii=False)}
-    """}
+            {"role": "system", "content": "Tu es un expert en communication créative pour centres commerciaux algériens."},
+            {"role": "user", "content": (
+                "Propose 12 idées de publications thématiques (une par semaine), formats recommandés, "
+                "et un mini-benchmark (3 concurrents) avec idées différenciantes.\n\n"
+                f"Dataset (sample):\n{json.dumps(df, indent=2, ensure_ascii=False)}"
+            )}
         ]
     }
-
-    safe_openrouter_request(API_URL, headers, payload_idees, "Idées et benchmarking", "rapport_idees.txt")
-
+    safe_openrouter_request(OPENROUTER_URL, API_KEY, payload_idees, "Idées et benchmarking", "rapport_idees.txt")
 
     # ==================================================
-    # 🔹 5. ASSEMBLAGE FINAL DES SECTIONS EN UN PDF
+    # Assemble final report (text + PDF) - unchanged structure
     # ==================================================
     print("📊 Génération du rapport stratégique global sans appel API...")
 
@@ -1542,14 +1615,11 @@ Dataset:
     ]
 
     def clean_text(text):
-        """Nettoie le texte pour supprimer les symboles Markdown et décoratifs inutiles."""
-        text = re.sub(r'[#=*]+', '', text)             # Supprimer #, =, *
-        text = re.sub(r'\n{2,}', '\n\n', text)         # Normaliser les sauts de ligne
-        text = text.replace('■', '').replace('–', '-') # Supprimer puces spéciales
-        text = text.strip()
-        return text
+        text = re.sub(r'[#=*]+', '', text)
+        text = re.sub(r'\n{2,}', '\n\n', text)
+        text = text.replace('■', '').replace('–', '-')
+        return text.strip()
 
-    # 🔹 Regroupement des sections dans un seul texte
     combined_text = ""
     for title, filename in sections:
         if os.path.exists(filename):
@@ -1559,7 +1629,6 @@ Dataset:
         else:
             combined_text += f"\n\n{title.upper()}\n\n⚠️ Fichier {filename} introuvable.\n"
 
-    # Sauvegarde du rapport texte global
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     combined_txt_path = f"rapport_strategique_global_{timestamp}.txt"
     with open(combined_txt_path, "w", encoding="utf-8") as f:
@@ -1567,12 +1636,7 @@ Dataset:
 
     print(f"✅ Rapport texte global sauvegardé : {combined_txt_path}")
 
-    # ==================================================
-    # 🔹 Création du PDF global avec design professionnel
-    # ==================================================
     pdf_path = f"rapport_strategique_global_{timestamp}.pdf"
-
-    # Lecture propre du contenu
     sections_content = {}
     for title, filename in sections:
         if os.path.exists(filename):
@@ -1581,11 +1645,11 @@ Dataset:
         else:
             sections_content[title] = "⚠️ Section manquante."
 
-    # Appel du générateur de PDF stylisé
+    # create_pdf_with_design must be available in your project (unchanged)
     create_pdf_with_design(sections_content, pdf_path, logo_path="logo_medina.png")
     print(f"📑 PDF final généré : {pdf_path}")
 
-    # (Optionnel) Sauvegarde et envoi du PDF
+    # Save to DB and send
     try:
         save_report_to_db(combined_text)
         print("💾 Rapport global sauvegardé en base de données.")
@@ -1593,17 +1657,14 @@ Dataset:
         print(f"⚠️ Erreur lors de la sauvegarde en DB : {e}")
 
     try:
-        recipients = ["guendil.yasmine.21@gmail.com"]
+        recipients = ["client.avis@elmedina-center.com"]
         send_pdf_report_via_email(pdf_path, recipients)
         print("📨 Rapport global envoyé par email avec succès.")
     except Exception as e:
         print(f"⚠️ Erreur d'envoi email : {e}")
 
-    # BONUS — OPTIMISATION GRAND VOLUME
     print("⚙️ Optimisation : traitement par lots activé pour grands volumes de commentaires.")
-    print("   → Chaque section lit uniquement les échantillons nécessaires ([:10])")
-    print("   → Possible extension : multiprocessing ou résumé automatique par post avant analyse")
-
+    print("   → Each section uses a sample of posts to keep payloads small. Increase sample_per_section if needed.")
 
 
 def clean_markdown(text):
@@ -1673,13 +1734,13 @@ def create_pdf_from_markdown(text, output_filename):
     doc.build(story)
     print(f"Successfully created {output_filename}")
 
-def send_pdf_report_via_email(pdf_path, recipients, subject="📊 Strategic Facebook Report", sender_email="ehphreporting@gmail.com", sender_password="uaxscuenhuijmnkw"):
+def send_pdf_report_via_email(pdf_path, recipients, subject="📊 Strategic Facebook Report", sender_email="reportgsh@gmail.com", sender_password="vrfbdtaxtmrkdjle"):
     try:
         msg = EmailMessage()
         msg['Subject'] = subject
         msg['From'] = f"El Medina Center Reporting"
         msg['To'] = ', '.join(recipients)
-        msg['Bcc'] = "guendil.yasmine.21@gmail.com"
+        msg['Bcc'] = "client.avis@elmedina-center.com"
         msg.set_content("Bonjour,\n\nVeuillez trouver ci-joint le dernier rapport stratégique généré par l'analyse IA des posts et commentaires Facebook.\n\nCordialement.")
 
         # Attach PDF

@@ -12,7 +12,7 @@ def get_page_posts(page_id, access_token, post_limit=300):
 
     # verify page and token
     verify_url = f"https://graph.facebook.com/v24.0/214973071707113"
-    verify_params = {'access_token': 'EAAPC0QetLgoBPjBIkipoyLbAHOLfgNpOIdAbn4dPDyCKpyE7g4QK1XKIdVJZBo0w1PsT3c2T2xVgXFXxFWjTYmgdZBUoZAZASDxZCGTNkZBGdoMuiNMSZBZCImG1XoHnYTYKqwrywf8B66hNpP7ECKvZAiJK2bdPUZASnNJlsxLdRK98osCbfZCiUhZC6Hl1GZAT3ZAb8FY6UZD', 'fields': 'name,id'}
+    verify_params = {'access_token': 'EAAPC0QetLgoBQXE9TGg5cERxcAocZBQCoeoaEbcJNUdCutII5L7vgYrQiZAZA9Qx6aEE55wZCYnlsrEVMGgKPSjMLcL62r2hKHi0L21OgN2AdBHNnUkbtkQgk0ZBJdEilw8TvtM9O5CQnc5wTGWD3KcBknOpIqN3jPOjHZCRLUZCVZBabW4MPv3jzXwLmHyzIZCJRB7sZD', 'fields': 'name,id'}
     
     verify_response = requests.get(verify_url, params=verify_params)
     verify_data = verify_response.json()
