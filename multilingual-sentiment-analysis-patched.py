@@ -1542,7 +1542,7 @@ def generate_strategic_report_from_posts(df):
                 "Analyse les publications et commentaires suivants du centre commercial El Medina Center. "
                 "Fournis une analyse détaillée des émotions, de la tonalité, et des thématiques émergentes. "
                 "Décris aussi les points forts et faibles de la communication.\n\n"
-                f"Dataset (sample, {len(df)} posts):\n{json.dumps(df, indent=2, ensure_ascii=False)}\n\n"
+                f"Dataset (sample, {len(df)} posts):\n{json.dumps(df.to_dict(orient='records'), indent=2, ensure_ascii=False)}\n\n"
                 "Format de sortie souhaité (FR):\n"
                 "1) Synthèse stratégique courte (4-6 lignes)\n"
                 "2) Analyse par publication (titre: post_id, observations, ton, suggestions)\n"
@@ -1564,7 +1564,7 @@ def generate_strategic_report_from_posts(df):
                 "À partir des posts et commentaires fournis, propose des recommandations concrètes "
                 "pour améliorer la stratégie de contenu (formats, ton, cadence), community management, "
                 "et KPI à suivre. Inclue exemples de posts (3 exemples) et templates de réponse (5 modèles).\n\n"
-                f"Dataset (sample):\n{json.dumps(df, indent=2, ensure_ascii=False)}"
+                f"Dataset (sample):\n{json.dumps(df.to_dict(orient='records'), indent=2, ensure_ascii=False)}"
             )}
         ]
     }
@@ -1580,7 +1580,7 @@ def generate_strategic_report_from_posts(df):
             {"role": "user", "content": (
                 "Identifie les questions fréquentes et génère des réponses types prêtes à poster. "
                 "Crée une petite FAQ (questions / réponses) et 10 messages courts pour les réponses rapides.\n\n"
-                f"Dataset (sample):\n{json.dumps(df, indent=2, ensure_ascii=False)}"
+                f"Dataset (sample):\n{json.dumps(df.to_dict(orient='records'), indent=2, ensure_ascii=False)}"
             )}
         ]
     }
@@ -1596,7 +1596,7 @@ def generate_strategic_report_from_posts(df):
             {"role": "user", "content": (
                 "Propose 12 idées de publications thématiques (une par semaine), formats recommandés, "
                 "et un mini-benchmark (3 concurrents) avec idées différenciantes.\n\n"
-                f"Dataset (sample):\n{json.dumps(df, indent=2, ensure_ascii=False)}"
+                f"Dataset (sample):\n{json.dumps(df.to_dict(orient='records'), indent=2, ensure_ascii=False)}"
             )}
         ]
     }
